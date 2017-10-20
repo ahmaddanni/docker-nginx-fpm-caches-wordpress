@@ -1,0 +1,108 @@
+---
+
+- name: Building the env file locally
+  hosts: localhost
+
+  tasks:
+      - name: Gather context
+        command: cd ../website/ && ./make_env
+
+
+- name: Deploy a Wordpress web site to remote host
+  hosts: all
+  vars:
+    ansible_user: "{{docker_host_user}}"
+    update_image: no
+    reload: smart
+    sqldir: "${HOME}/sql"
+    no_db_import: no
+
+  vars_prompt:
+     - name: "registry_password"
+       prompt: "please, enter registry password"
+       private: yes
+
+  tasks:
+
+     - name: login to the remote registry
+       docker_login:
+         registry: "{{registry_url}}"
+         username: "{{registry_user}}"
+         password: "{{registry_password}}"
+         reauthorize: yes
+
+     - name: create the sql directory for database import and backup
+       file:
+         path: "{{sqldir}}"
+         state: directory
+         mode: 0755
+
+     - name: optionally set up flag to prevent database import
+       command: touch "{{sqldir}}/no_db_import"
+       when: no_db_import == "yes"
+
+     - name: deploy web site
+       docker_service:
+        project_name: "{{ lookup('ini', 'COMPOSE_PROJECT_NAME type=properties file=../website/.env') }}"
+        pull: "{{update_image}}"
+        recreate: "{{reload}}"
+        definition:
+          version: '2'
+          services:
+           webapp:
+            restart: 'unless-stopped'
+            cap_add:
+              - NET_ADMIN
+            networks:
+              - wp_net
+            image: "{{registry_url}}/{{ lookup('ini', 'IMAGE_NAME type=properties file=../website/.env') }}:{{ lookup('ini', 'VERSION type=properties file=../website/.env') }}"
+            volumes:
+              - /etc/letsencrypt:/etc/letsencrypt
+              - "{{sqldir}}:/root/sql"
+            ports:
+              - 443:443
+              - 80:80
+            depends_on:
+              - db
+            environment:
+              SERVER_NAME: "{{ lookup('ini', 'SERVER_NAME type=properties file=../website/.env') }}"
+              ADMIN_EMAIL: "{{ lookup('ini', 'ADMIN_EMAIL type=properties file=../website/.env') }}"
+              ADMIN_PASSWORD: "{{ lookup('ini', 'ADMIN_PASSWORD type=properties file=../website/.env') }}"
+              DB_HOSTNAME: dbs
+              DB_USER: "{{ lookup('ini', 'WP_DB_USER type=properties file=../website/.env') }}"
+              DB_PASSWORD: "{{ lookup('ini', 'WP_DB_PASSWORD type=properties file=../website/.env') }}"
+              DB_DATABASE: "{{ lookup('ini', 'WP_DB_NAME type=properties file=../website/.env') }}"
+            links:
+              - db:dbs
+           db:
+            restart: 'unless-stopped'
+            networks:
+              - wp_net
+            image: mariadb:10.2
+            volumes:
+              - mariadb_data:/var/lib/mysql
+            environment:
+              MYSQL_RANDOM_ROOT_PASSWORD: 1
+              MYSQL_USER: "{{ lookup('ini', 'WP_DB_USER type=properties file=../website/.env') }}"
+              MYSQL_PASSWORD: "{{ lookup('ini', 'WP_DB_PASSWORD type=properties file=../website/.env') }}"
+              MYSQL_DATABASE: "{{ lookup('ini', 'WP_DB_NAME type=properties file=../website/.env') }}"
+
+          networks:
+            wp_net:
+             driver: bridge
+
+          volumes:
+            mariadb_data:
+
+       register: output
+
+     - debug:
+        var: output
+
+     - assert:
+        that:
+          - "webapp.{{ lookup('ini', 'COMPOSE_PROJECT_NAME type=properties file=../website/.env') }}_webapp_1.state.running"
+          - "db.{{ lookup('ini', 'COMPOSE_PROJECT_NAME type=properties file=../website/.env') }}_db_1.state.running"
+
+     - name: set up SSL certificate
+       command: docker exec -i "{{ lookup('ini', 'COMPOSE_PROJECT_NAME type=properties file=../website/.env') }}_webapp_1" bash -l -c "/setup_web_cert"

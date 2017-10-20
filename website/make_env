@@ -1,0 +1,35 @@
+#!/bin/bash
+
+set -ex
+
+cd wordpress
+BUILD_DATE=`date -u +"%Y-%m-%dT%H:%M:%SZ"`
+VCS_REF=`git rev-parse --short HEAD`
+VERSION=`cat ../VERSION`
+cd ..
+
+if [ ! -f .env ];then
+    {
+		echo "SERVER_NAME=example.com";
+		echo "COMPOSE_PROJECT_NAME=wordpress";
+        echo "#The email will be used for registering to Lets Encrypt for the TLS certificate"
+		echo "ADMIN_EMAIL=user@example.com";
+		echo "ADMIN_PASSWORD=changeme";
+		echo "WP_DB_USER=wordpress";
+		echo "WP_DB_PASSWORD=wordpress";
+		echo "WP_DB_NAME=wordpress";
+		echo "MYSQL_ROOT_PASSWORD=wordpress";
+		echo "IMAGE_NAME=my-wordpress-dev";
+		echo "REGISTRY_URL=registry.gitlab.com"
+		echo "BUILD_DATE=$BUILD_DATE";
+		echo "VCS_REF=$VCS_REF";
+		echo "VERSION=$VERSION";
+	} > .env
+    echo ".env created"
+else
+    sed -i.bak -e "s/BUILD_DATE\s*=\s*.*$/BUILD_DATE=$BUILD_DATE/
+                s/VCS_REF\s*=\s*.*$/VCS_REF=$VCS_REF/
+                s/VERSION\s*=\s*.*$/VERSION=$VERSION/" .env
+    echo ".env updated"
+fi
+

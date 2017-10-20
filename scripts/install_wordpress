@@ -1,0 +1,151 @@
+#!/bin/bash
+
+set -e
+
+# setting up default for environment variables
+SERVER_NAME=${SERVER_NAME:-my-example.com}
+DB_HOSTNAME=${DB_HOSTNAME:-$DB_PORT_3306_TCP_ADDR}
+DB_USER=${DB_USER:-$DB_MYSQL_USER}
+DB_PASSWORD=${DB_PASSWORD:-$DB_MYSQL_PASSWORD}
+DB_DATABASE=${DB_DATABASE:-$DB_MYSQL_DATABASE}
+
+# making sure only one instance of this script run
+
+if [ ! -f /var/run/install_wordpress.pid ];then
+    echo $$ > /var/run/install_wordpress.pid
+else
+    echo "install_wordpress is already running"
+    exit 1
+fi
+
+echo "$(date): Installing  Wordpress for $SERVER_NAME"
+
+
+
+# Installing WP-CLI
+
+echo "Installing WP-CLI"
+cd /tmp && curl -O -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+chmod +x wp-cli.phar &&  mv wp-cli.phar /usr/local/bin/wp
+gosu www-data wp --info && echo "WP-CLI installed"
+
+
+# Installing wordpress
+echo "Setting up the Wordpress document root"
+
+if [ ! -d "/usr/share/nginx/www" ]; then
+
+    if [ -d "/usr/share/nginx/wordpress" ]; then
+        echo "copying wordpress -> www in /usr/share/nginx/"
+        cp -r /usr/share/nginx/wordpress /usr/share/nginx/www
+        chown -R www-data /usr/share/nginx/www
+    else
+        echo "/usr/share/nginx/wordpress does not exist"
+    fi
+
+else
+    echo "/usr/share/nginx/www already exists"
+fi
+
+
+echo "Backing up existing wp-config in case variables have been manually added to it"
+if [ -f /usr/share/nginx/www/wp-config.php ]; then
+  cp /usr/share/nginx/www/wp-config.php /usr/share/nginx/www/wp-config.php.bak
+fi
+
+
+# configuring DB connection strings
+echo "Replacing database connection details in wp-config with $DB_DATABASE, $DB_HOSTNAME, $DB_USER, DB_PASSWORD (hidden)"
+sed -e "s/database_name_here/$DB_DATABASE/
+s/localhost/$DB_HOSTNAME/
+s/username_here/$DB_USER/
+s/password_here/$DB_PASSWORD/" /etc/wp-config-sample.php > /usr/share/nginx/www/wp-config.php
+
+# generating random keys used in Wordpress for salting
+echo "Generating salt for Wordpress secret keys using api.wordrpess.org"
+# thanks to http://stackoverflow.com/questions/9437309/bash-sed-find-replace-with-special-characters
+perl -i -pe '
+  BEGIN {
+    $keysalts = qx(curl -fsSL https://api.wordpress.org/secret-key/1.1/salt)
+  }
+  s/#random_key_here/$keysalts/g
+' /usr/share/nginx/www/wp-config.php
+
+
+echo "generated wp-config.php"
+
+# check whether it is a new install or not by checking existence of database dump
+
+
+if ! [[ -f /usr/share/nginx/wordpress.sql || -f /usr/share/nginx/wordpress.sql.loaded ]]; then
+
+    echo "no database dump so it's a new install..."
+    # Replacing Wordpress Default Password handling with wp-password-bcrypt
+    # explanation here: https://roots.io/wordpress-password-security-follow-up/
+    if [ ! -d /usr/share/nginx/www/wp-content/mu-plugins ];then
+        mkdir -p /usr/share/nginx/www/wp-content/mu-plugins
+    fi
+    cd  /usr/share/nginx/www/wp-content/mu-plugins && curl -O -fsSL https://raw.githubusercontent.com/roots/wp-password-bcrypt/master/wp-password-bcrypt.php
+    echo "performed: installed wp-password-bcrypt"
+
+    # Wordpress initial setup
+    gosu www-data wp core install --url=https://$SERVER_NAME --title=$SERVER_NAME --admin_user=admin --admin_email=$ADMIN_EMAIL --admin_password=$ADMIN_PASSWORD
+    echo "performed: wp core install (--url=https://$SERVER_NAME --title=$SERVER_NAME --admin_user=admin --admin_email=$ADMIN_EMAIL --admin_password=##HIDDEN##)"
+
+
+    # Bootstraping Nginx Helper Wordpress plugin's log
+    if [ ! -d /usr/share/nginx/www/wp-content/uploads/nginx-helper ];then
+        mkdir -p /usr/share/nginx/www/wp-content/uploads/nginx-helper
+    fi
+    echo "Start logging" >> /usr/share/nginx/www/wp-content/uploads/nginx-helper/nginx.log
+    chown www-data:www-data /usr/share/nginx/www/wp-content/uploads/nginx-helper/nginx.log
+
+    # installing WPFail2Ban plugin
+    cd /usr/share/nginx/www
+    gosu www-data wp plugin install wp-fail2ban --activate
+
+    # installing Nginx Helper plugin
+    gosu www-data wp plugin install nginx-helper --activate
+
+    # installing WP Content Security Policy  plugin
+    gosu www-data wp plugin install wp-content-security-policy --activate
+
+    # installing Disable XML-RPC Pingback
+    gosu www-data wp plugin install disable-xml-rpc-pingback --activate
+
+
+
+else
+
+    echo "this is an existing Wordpress web site, loading the database dump if not loaded already ..."
+    if ! [[  -f /usr/share/nginx/wordpress.sql.loaded || -f /root/sql/no_db_import ]]; then
+        mysql  -h $DB_HOSTNAME -u $DB_USER -p$DB_PASSWORD $DB_DATABASE < /usr/share/nginx/wordpress.sql
+        if [ $? = 0 ]; then
+            mv /usr/share/nginx/wordpress.sql /usr/share/nginx/wordpress.sql.loaded
+            echo "performed mysql database import"
+        fi
+    else
+        echo "nothing to do, database dump already imported or no_db_import option set"
+    fi
+
+fi
+
+
+# copying wordpress filters for fail2ban
+echo "Downloading fail2ban Wordpress filters"
+cd /etc/fail2ban/filter.d/ \
+   && curl -O -fsSL https://plugins.svn.wordpress.org/wp-fail2ban/trunk/filters.d/wordpress-hard.conf \
+   && curl -O -fsSL https://plugins.svn.wordpress.org/wp-fail2ban/trunk/filters.d/wordpress-soft.conf
+
+# restarting fail2ban
+echo "(Re)starting fail2ban..."
+supervisorctl restart fail2ban
+fail2ban-client -s /var/run/fail2ban/fail2ban.sock reload
+
+echo "Wordpress installed on $(date)" > /tmp/last_wordpress
+
+if [ -f /var/run/install_wordpress.pid ];then
+    rm /var/run/install_wordpress.pid
+fi
+
+exit 0

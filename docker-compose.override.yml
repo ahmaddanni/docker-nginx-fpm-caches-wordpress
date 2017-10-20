@@ -1,0 +1,19 @@
+version: '3'
+services:
+  webapp:
+    env_file: website/.env
+    restart: 'no'
+    build:
+      context: .
+      args:
+        PHP_MEMLIMIT: ${PHP_MEMLIMIT}
+        VCS_REF: ${VCS_REF}
+        BUILD_DATE: ${BUILD_DATE}
+        VERSION: ${VERSION}
+    environment:
+      DEBUG: 'true'
+    image: ${REGISTRY_URL}/${IMAGE_NAME}:${VERSION}
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /${HOME}/Downloads:/root/sql
